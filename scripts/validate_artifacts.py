@@ -54,8 +54,11 @@ def validate_svg(path: Path) -> tuple[str, str]:
             candidate
             for candidate in candidates
             if len({element.attrib.get("y", "") for element in candidate}) == 7
-            and len(candidate)
-            == 7 * len({element.attrib.get("x", "") for element in candidate})
+            and len({
+                (element.attrib.get("x", ""), element.attrib.get("y", ""))
+                for element in candidate
+            })
+            == len(candidate)
         ),
         None,
     )
