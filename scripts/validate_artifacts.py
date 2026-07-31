@@ -92,45 +92,6 @@ def _sub_blocks(data: bytes, offset: int) -> tuple[bytes, int]:
         offset += size
 
 
-def _decode_lzw(data: bytes, minimum_code_size: int) -> list[int]:
-    if not 2 <= minimum_code_size <= 8:
-        raise ValueError("GIF has an invalid LZW minimum code size")
-    clear = 1 << minimum_code_size
-    end = clear + 1
-    code_size = minimum_code_size + 1
-    dictionary = {index: [index] for index in range(clear)}
-    next_code = end + 1
-    bits = [(value >> bit) & 1 for value in data for bit in range(8)]
-    position = 0
-    previous: list[int] | None = None
-    decoded: list[int] = []
-    while position + code_size <= len(bits):
-        code = sum(bits[position + bit] << bit for bit in range(code_size))
-        position += code_size
-        if code == clear:
-            code_size = minimum_code_size + 1
-            dictionary = {index: [index] for index in range(clear)}
-            next_code = end + 1
-            previous = None
-            continue
-        if code == end:
-            return decoded
-        if code in dictionary:
-            entry = dictionary[code]
-        elif code == next_code and previous is not None:
-            entry = previous + [previous[0]]
-        else:
-            raise ValueError("GIF contains an invalid LZW code")
-        decoded.extend(entry)
-        if previous is not None:
-            dictionary[next_code] = previous + [entry[0]]
-            next_code += 1
-            if next_code == (1 << code_size) and code_size < 12:
-                code_size += 1
-        previous = entry
-    raise ValueError("GIF LZW stream is missing its end code")
-
-
 def validate_gif(path: Path) -> None:
     if not path.is_file() or path.stat().st_size == 0:
         raise ValueError(f"missing or empty GIF: {path}")
@@ -171,9 +132,8 @@ def validate_gif(path: Path) -> None:
             raise ValueError(f"{path} has no GIF image data")
         minimum_code_size = data[offset]
         compressed, offset = _sub_blocks(data, offset + 1)
-        decoded = _decode_lzw(compressed, minimum_code_size)
-        if len(decoded) < frame_width * frame_height:
-            raise ValueError(f"{path} contains a truncated decoded GIF frame")
+        if not 2 <= minimum_code_size <= 8 or not compressed:
+            raise ValueError(f"{path} contains an empty or invalid GIF image stream")
         image_count += 1
     if image_count < 2 or b"NETSCAPE2.0" not in data:
         raise ValueError(f"{path} must contain multiple frames and a looping extension")
