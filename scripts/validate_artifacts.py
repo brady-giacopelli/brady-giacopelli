@@ -33,17 +33,40 @@ def validate_svg(path: Path) -> tuple[str, str]:
     if len(view_box.split()) != 4:
         raise ValueError(f"{path} has no usable SVG viewBox")
     rects = [element for element in root.iter() if _local_name(element.tag) == "rect"]
-    grid_rects = [
+    class_grid_rects = [
         element
         for element in rects
         if "c" in element.attrib.get("class", "").split()
     ]
-    if not grid_rects:
-        raise ValueError(f"{path} contains no grid or snake cells")
+    # The pinned upstream renderer identifies grid cells with class="c". Keep
+    # a geometry fallback because SVG optimizers may remove or rewrite class
+    # attributes while preserving the grid's x/y/rx/ry cell geometry.
+    geometry_grid_rects = [
+        element
+        for element in rects
+        if {"x", "y", "rx", "ry"}.issubset(element.attrib)
+        and "width" not in element.attrib
+        and "height" not in element.attrib
+    ]
+    candidates = [candidate for candidate in (class_grid_rects, geometry_grid_rects) if candidate]
+    grid_rects = next(
+        (
+            candidate
+            for candidate in candidates
+            if len({element.attrib.get("y", "") for element in candidate}) == 7
+            and len(candidate)
+            == 7 * len({element.attrib.get("x", "") for element in candidate})
+        ),
+        None,
+    )
+    if grid_rects is None:
+        details = ", ".join(
+            f"{len(candidate)} cells/{len({element.attrib.get('y', '') for element in candidate})} rows"
+            for candidate in candidates
+        ) or "no grid candidates"
+        raise ValueError(f"{path} does not contain exactly seven logical contribution rows ({details})")
     rows = {element.attrib.get("y", "") for element in grid_rects}
     columns = {element.attrib.get("x", "") for element in grid_rects}
-    if len(rows) != 7 or len(grid_rects) != len(rows) * len(columns):
-        raise ValueError(f"{path} does not contain exactly seven logical contribution rows")
     geometry = "|".join(
         ",".join(element.attrib.get(key, "") for key in ("x", "y", "width", "height", "rx", "ry"))
         for element in grid_rects
