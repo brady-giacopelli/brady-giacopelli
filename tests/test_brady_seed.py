@@ -14,6 +14,23 @@ def calendar_for(window: brady_seed.DateWindow, default: int = 0) -> dict[date, 
 
 
 class BradySeedTests(unittest.TestCase):
+    def test_bitmap_matches_previous_brady_snapshot(self):
+        bitmap = brady_seed.load_pattern()
+        expected = (
+            "0000000000011110011110001110011110010001000000000000",
+            "0000000000010001010001010001010001010001000000000000",
+            "0000000000010001010001010001010001001010000000000000",
+            "0000000000011110011110011111010001000100000000000000",
+            "0000000000010001010100010001010001000100000000000000",
+            "0000000000010001010010010001010001000100000000000000",
+            "0000000000011110010001010001011110000100000000000000",
+        )
+
+        self.assertEqual(tuple("".join(map(str, row)) for row in bitmap), expected)
+        self.assertEqual(sum(sum(row) for row in bitmap), 84)
+        self.assertEqual(len(bitmap), 7)
+        self.assertTrue(all(len(row) == 52 for row in bitmap))
+
     def test_window_excludes_current_partial_week(self):
         window = brady_seed.window_for_utc(date(2024, 3, 10))
         self.assertEqual(window.start, date(2023, 3, 12))
