@@ -2,7 +2,7 @@ name: Generate Snake
 
 on:
   schedule:
-    - cron: "17 3 * * *"  # Daily, UTC, at a non-round minute
+    - cron: "17 3 * * *" # Daily, UTC, at a non-round minute
   workflow_dispatch:
 
 concurrency:
@@ -15,25 +15,39 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
-      - name: Test grid model and renderer
+      - name: Require profile-wide contribution token
+        env:
+          PROFILE_GITHUB_TOKEN: ${{ secrets.PROFILE_GITHUB_TOKEN }}
+        run: test -n "$PROFILE_GITHUB_TOKEN"
+
+      - name: Test seed planner and artifact validator
         run: python3 -m unittest discover -s tests -v
 
-      - name: Generate deterministic BRADY snake artifacts
-        run: python3 scripts/brady_snake.py --output-dir dist --summary-file "$GITHUB_STEP_SUMMARY"
+      - name: Generate contribution-aware snake artifacts
+        uses: Platane/snk@d8f6715049803e982ee5ff501b6b9b7d5deeb09b # v3
+        with:
+          github_user_name: brady-giacopelli
+          github_token: ${{ secrets.PROFILE_GITHUB_TOKEN }}
+          outputs: |
+            dist/github-contribution-grid-snake.svg?palette=github-light
+            dist/github-contribution-grid-snake-dark.svg?palette=github-dark
+            dist/github-contribution-grid-snake.gif?palette=github-light
 
-      - name: Validate published artifact set
-        run: python3 scripts/brady_snake.py --validate dist
+      - name: Validate all artifacts before publishing
+        run: python3 scripts/validate_artifacts.py dist
 
-      - uses: crazy-max/ghaction-github-pages@v4
+      - uses: crazy-max/ghaction-github-pages@df5cc2bfa78282ded844b354faee141f06b41865 # v4
         with:
           target_branch: output
           build_dir: dist
