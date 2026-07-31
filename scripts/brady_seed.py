@@ -15,9 +15,12 @@ run and prints the exact mode, target, and number of commits it would create.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
+import tempfile
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -306,6 +309,131 @@ def _git(*args: str, capture: bool = True, env: Mapping[str, str] | None = None)
     return result.stdout.strip() if capture else ""
 
 
+def _git_bytes(*args: str) -> bytes:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+    )
+    return result.stdout
+
+
+def _tree_entries(tree_data: bytes) -> list[tuple[bytes, bytes, bytes]]:
+    entries: list[tuple[bytes, bytes, bytes]] = []
+    for record in tree_data.split(b"\0"):
+        if not record:
+            continue
+        metadata, name = record.split(b"\t", 1)
+        mode, _, object_id = metadata.split(b" ", 2)
+        entries.append((mode, name, bytes.fromhex(object_id.decode("ascii"))))
+    return entries
+
+
+def _write_git_object(object_dir: Path, algorithm: str, kind: bytes, content: bytes) -> bytes:
+    raw = kind + b" " + str(len(content)).encode("ascii") + b"\0" + content
+    digest = hashlib.new(algorithm, raw).digest()
+    object_path = object_dir / digest.hex()[:2] / digest.hex()[2:]
+    if not object_path.exists():
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=object_path.parent, delete=False) as temporary:
+            temporary.write(zlib.compress(raw))
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, object_path)
+    return digest
+
+
+def _write_git_tree(
+    object_dir: Path,
+    algorithm: str,
+    entries: Iterable[tuple[bytes, bytes, bytes]],
+) -> bytes:
+    tree = bytearray()
+    for mode, name, object_id in sorted(entries, key=lambda entry: entry[1]):
+        tree.extend(mode + b" " + name + b"\0" + object_id)
+    return _write_git_object(object_dir, algorithm, b"tree", bytes(tree))
+
+
+def _replace_tree_entry(
+    entries: Iterable[tuple[bytes, bytes, bytes]],
+    mode: bytes,
+    name: bytes,
+    object_id: bytes,
+) -> list[tuple[bytes, bytes, bytes]]:
+    result = [entry for entry in entries if entry[1] != name]
+    result.append((mode, name, object_id))
+    return result
+
+
+def _build_seed_commit_chain(plan: SeedPlan, ledger_path: Path) -> None:
+    """Create the linear ledger commit chain without invoking Git per commit."""
+
+    name, email = _identity()
+    object_dir = Path(_git("rev-parse", "--git-path", "objects"))
+    if not object_dir.is_absolute():
+        object_dir = REPO_ROOT / object_dir
+    algorithm = _git("rev-parse", "--show-object-format")
+    parent = bytes.fromhex(_git("rev-parse", "HEAD"))
+    root_entries = _tree_entries(_git_bytes("ls-tree", "-z", "HEAD"))
+
+    data_entry = next((entry for entry in root_entries if entry[1] == b"data"), None)
+    if data_entry and data_entry[0] != b"040000":
+        raise RuntimeError("cannot create the seed ledger because data is not a directory")
+    data_entries = (
+        _tree_entries(_git_bytes("ls-tree", "-z", data_entry[2].hex()))
+        if data_entry
+        else []
+    )
+    ledger_name = b"brady-seed-ledger.jsonl"
+    ledger_bytes = ledger_path.read_bytes() if ledger_path.exists() else b""
+    committer_timestamp = int(datetime.now(timezone.utc).timestamp())
+
+    for sequence, commit in enumerate(plan.commits, 1):
+        ledger_bytes += (json.dumps({
+            "schema": LEDGER_SCHEMA,
+            "date": commit.cell_date.isoformat(),
+            "role": commit.role,
+            "sequence": sequence,
+        }, sort_keys=True) + "\n").encode("utf-8")
+        ledger_blob = _write_git_object(object_dir, algorithm, b"blob", ledger_bytes)
+        data_tree = _write_git_tree(
+            object_dir,
+            algorithm,
+            _replace_tree_entry(data_entries, b"100644", ledger_name, ledger_blob),
+        )
+        root_tree = _write_git_tree(
+            object_dir,
+            algorithm,
+            _replace_tree_entry(root_entries, b"040000", b"data", data_tree),
+        )
+
+        author_timestamp = int(
+            datetime(
+                commit.cell_date.year,
+                commit.cell_date.month,
+                commit.cell_date.day,
+                12,
+                tzinfo=timezone.utc,
+            ).timestamp()
+        )
+        identity = f"{name} <{email}>"
+        commit_data = (
+            f"tree {root_tree.hex()}\n"
+            f"parent {parent.hex()}\n"
+            f"author {identity} {author_timestamp} +0000\n"
+            f"committer {identity} {committer_timestamp} +0000\n"
+            f"\n{SEED_PREFIX} {commit.role} date={commit.cell_date.isoformat()}\n"
+        ).encode("utf-8")
+        parent = _write_git_object(object_dir, algorithm, b"commit", commit_data)
+
+        if sequence % 500 == 0 or sequence == len(plan.commits):
+            print(f"Built {sequence}/{len(plan.commits)} seed commits", flush=True)
+
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_bytes(ledger_bytes)
+    _git("reset", "--hard", parent.hex(), capture=False)
+
+
 def _identity() -> tuple[str, str]:
     name = os.environ.get("BRADY_COMMIT_NAME")
     email = os.environ.get("BRADY_COMMIT_EMAIL")
@@ -331,36 +459,7 @@ def apply_seed_plan(plan: SeedPlan, ledger_path: Path = LEDGER_PATH) -> None:
         return
     if _git("status", "--porcelain"):
         raise RuntimeError("refusing to seed a dirty working tree")
-    name, email = _identity()
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    committer_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
-    with ledger_path.open("a", encoding="utf-8") as ledger:
-        for sequence, commit in enumerate(plan.commits, 1):
-            ledger.write(json.dumps({
-                "schema": LEDGER_SCHEMA,
-                "date": commit.cell_date.isoformat(),
-                "role": commit.role,
-                "sequence": sequence,
-            }, sort_keys=True) + "\n")
-            ledger.flush()
-            environment = os.environ.copy()
-            environment.update({
-                "GIT_AUTHOR_NAME": name,
-                "GIT_AUTHOR_EMAIL": email,
-                "GIT_AUTHOR_DATE": f"{commit.cell_date.isoformat()}T12:00:00+0000",
-                "GIT_COMMITTER_NAME": name,
-                "GIT_COMMITTER_EMAIL": email,
-                "GIT_COMMITTER_DATE": committer_now,
-            })
-            _git("add", str(ledger_path.relative_to(REPO_ROOT)), capture=False)
-            _git(
-                "commit",
-                "--no-verify",
-                "-m",
-                f"{SEED_PREFIX} {commit.role} date={commit.cell_date.isoformat()}",
-                capture=False,
-                env=environment,
-            )
+    _build_seed_commit_chain(plan, ledger_path)
 
 
 def plan_summary(plan: SeedPlan) -> str:
