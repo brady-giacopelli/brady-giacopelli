@@ -2,8 +2,12 @@ name: Generate Snake
 
 on:
   schedule:
-    - cron: "0 */1 * * *"  # Runs every hour
+    - cron: "17 3 * * *"  # Daily, UTC, at a non-round minute
   workflow_dispatch:
+
+concurrency:
+  group: snake-output
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -11,19 +15,24 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v4
-      
-      - uses: Platane/snk@v3
-        id: snake-gif
+
+      - uses: actions/setup-python@v5
         with:
-          github_user_name: brady-giacopelli  # Replace with your GitHub username
-          outputs: |
-            dist/github-contribution-grid-snake.svg
-            dist/github-contribution-grid-snake-dark.svg?palette=github-dark
-            dist/github-contribution-grid-snake.gif
-      
+          python-version: "3.12"
+
+      - name: Test grid model and renderer
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Generate deterministic BRADY snake artifacts
+        run: python3 scripts/brady_snake.py --output-dir dist --summary-file "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate published artifact set
+        run: python3 scripts/brady_snake.py --validate dist
+
       - uses: crazy-max/ghaction-github-pages@v4
         with:
           target_branch: output
